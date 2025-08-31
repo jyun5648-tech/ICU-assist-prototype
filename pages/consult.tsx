@@ -113,10 +113,15 @@ export default function Home() {
           {viewMode === "raw" ? (
             <pre>{output}</pre>
           ) : (
-            Object.entries(grouped) as [string, string[]][]).map(([title, lines]) => (
-              <div key={title} style={{ border: "1px solid #ccc", padding: 10, margin: "10px 0" }}>
-                <h4>{title}</h4>
-                <p>{lines.join("\n")}</p>
+           {result && (
+  <div className="prose max-w-none">
+    <h2>提案</h2>
+    <pre className="whitespace-pre-wrap text-sm bg-gray-50 p-3 rounded-xl">
+      {result}
+    </pre>
+  </div>
+)}
+
               </div>
             ))
           )}
