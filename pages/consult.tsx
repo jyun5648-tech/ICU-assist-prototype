@@ -113,7 +113,7 @@ export default function Home() {
           {viewMode === "raw" ? (
             <pre>{output}</pre>
           ) : (
-            Object.entries(parseSections(output)).map(([title, lines]) => (
+            Object.entries(grouped) as [string, string[]][]).map(([title, lines]) => (
               <div key={title} style={{ border: "1px solid #ccc", padding: 10, margin: "10px 0" }}>
                 <h4>{title}</h4>
                 <p>{lines.join("\n")}</p>
