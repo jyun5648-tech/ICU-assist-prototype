@@ -1,3 +1,4 @@
+// pages/Ventilation.tsx
 // @ts-nocheck
 
 import { useMemo, useState } from "react";
@@ -130,12 +131,14 @@ export default function Ventilation() {
 
   return (
     <div style={{ minHeight: "100vh", background: "#f9fafb", padding: 16 }}>
-      <div style={{ maxWidth: 1200, margin: "0 auto", display: "grid", gridTemplateColumns: "2fr 1fr", gap: 16 }}>
+      {/* ★ レイアウト：モバイル1カラム / md以上で 2fr:1fr */}
+      <div className="layout">
         {/* 入力側 */}
         <div>
           <div style={box}>
             <h2>🫁 呼吸管理モード</h2>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 8, marginTop: 8 }}>
+            {/* ★ 6列 → モバイルでは2列 */}
+            <div className="grid6" style={{ marginTop: 8 }}>
               <Field label="年齢"><NumberBox value={age} setValue={setAge} /></Field>
               <Field label="性別">
                 <select value={sex} onChange={(e) => setSex(e.target.value as any)} style={inputStyle}>
@@ -171,7 +174,8 @@ export default function Ventilation() {
           </div>
 
           <div style={box}>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 3fr", gap: 8, alignItems: "end" }}>
+            {/* ★ 1:3 → モバイルでは1列 */}
+            <div className="grid12" style={{ alignItems: "end", gap: 8 }}>
               <div>
                 <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 4 }}>モード</div>
                 <select value={mode} onChange={(e) => setMode(e.target.value as Mode)} style={inputStyle}>
@@ -180,7 +184,9 @@ export default function Ventilation() {
                   ))}
                 </select>
               </div>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 8 }}>
+
+              {/* ★ 設定群：6列 → モバイルでは2列 */}
+              <div className="grid6">
                 {(mode === "VCV" || mode === "SIMV") && (
                   <>
                     <Field label="VT(mL)"><NumberBox value={VTml} setValue={setVTml} /></Field>
@@ -225,7 +231,8 @@ export default function Ventilation() {
 
           <div style={box}>
             <h3>ABG</h3>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 8 }}>
+            {/* ★ 6列 → モバイルでは2列 */}
+            <div className="grid6">
               <Field label="pH"><NumberBox value={pH} setValue={setPH} /></Field>
               <Field label="PaO₂(mmHg)"><NumberBox value={PaO2} setValue={setPaO2} /></Field>
               <Field label="PaCO₂(mmHg)"><NumberBox value={PaCO2} setValue={setPaCO2} /></Field>
@@ -279,6 +286,47 @@ export default function Ventilation() {
           </div>
         </div>
       </div>
+
+      {/* ★ ここからCSS（styled-jsx）。このまま置けばOK */}
+      <style jsx>{`
+        /* 親レイアウト：モバイル1カラム、md↑で 2fr:1fr */
+        .layout {
+          max-width: 1200px;
+          margin: 0 auto;
+          display: grid;
+          gap: 16px;
+          grid-template-columns: 1fr; /* mobile: 1カラム */
+        }
+        @media (min-width: 768px) {
+          .layout {
+            grid-template-columns: 2fr 1fr; /* md以上で2カラム */
+          }
+        }
+
+        /* 6列フォーム：mobileは2列、md↑で6列 */
+        .grid6 {
+          display: grid;
+          gap: 8px;
+          grid-template-columns: repeat(2, 1fr); /* mobile: 2列 */
+        }
+        @media (min-width: 768px) {
+          .grid6 {
+            grid-template-columns: repeat(6, 1fr); /* md以上: 6列 */
+          }
+        }
+
+        /* 1:3の横並び：mobileは1列、md↑で1:3 */
+        .grid12 {
+          display: grid;
+          gap: 8px;
+          grid-template-columns: 1fr; /* mobile: 1列 */
+        }
+        @media (min-width: 768px) {
+          .grid12 {
+            grid-template-columns: 1fr 3fr; /* md以上: 1:3 */
+          }
+        }
+      `}</style>
     </div>
   );
 }
