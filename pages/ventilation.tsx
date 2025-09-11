@@ -23,12 +23,28 @@ function niceTicks(min: number, max: number, count = 4) {
 const fmt = (n: number) => (Math.abs(n) >= 100 ? Math.round(n).toString() : (Math.round(n * 10) / 10).toString());
 
 /* ========== LocalStorage Helper ========== */
-const LS_KEY = "icuAssistVentLogs:v1";
+const LS_KEY = "icuAssistVentLogs:v2";
+
+type Pressor = {
+  id: string;
+  drug: "Nad" | "DOA" | "DOB" ;
+  rateMlH?: number | "";   // mL/h
+  concMgMl?: number | "";  // mg/mL（薬剤選択でプリセット自動入力、上書き可）
+  gamma?: number | undefined; // 自動計算結果（表示のみ）
+};
+
+// 院内プリセット（ダミー。院内規格に合わせて自由に編集）
+const PRESSOR_PRESETS: Record<Pressor["drug"], { label: string; defaultConc?: number; choices?: number[] }> = {
+  NA:   { label: "Nad",    defaultConc: 0.06, choices: [0.04, 0.06, 0.08, 0.10] },
+  DOPA: { label: "DOP",  defaultConc: 4.0,  choices: [2.0, 3.0, 4.0, 6.0] },
+  DOBU: { label: "DOB", defaultConc: 2.0,  choices: [1.0, 2.0, 4.0] },
+  };
+
 
 type VentLog = {
-  id: string;                // uuid-ish
-  ts: string;                // ISO datetime
-  patientTag?: string;       // tags[0]
+  id: string;
+  ts: string;
+  patientTag?: string;
   mode: string;
   PBW?: number;
   VTml?: number | "";
@@ -53,6 +69,19 @@ type VentLog = {
   hasCOPD?: boolean;
   hasESRD?: boolean;
   dni?: boolean;
+
+  // 追加：循環・出血・尿量
+  map?: number | "";
+  spo2?: number | "";
+  urine1h?: number | "";
+  bleeding1h?: number | "";
+  uoPerKgH?: number | undefined;
+
+  // 追加：昇圧剤
+  pressors?: { drug: string; gamma?: number }[];
+
+  // ガードレール
+  guardrailReasons?: string[];
 
   summary: string;
   problems: string[];
@@ -100,17 +129,22 @@ function downloadFile(filename: string, content: string, mime = "application/jso
 function toCSV(logs: VentLog[]) {
   const headers = [
     "ts","patientTag","mode","PBW","VTml","RR","FiO2","PEEP","Pinsp","IPAP","EPAP","Flow","IEr",
-    "pH","PaO2","PaCO2","HCO3","Lac","PFr","vtPerKg","hasCOPD","hasESRD","dni","summary","problems","suggestions"
+    "pH","PaO2","PaCO2","HCO3","Lac","PFr","vtPerKg",
+    "MAP","SpO2","Urine1h","Bleeding1h","UOmlkgH",
+    "Pressors","Guardrails",
+    "summary","problems","suggestions"
   ];
   const esc = (v: any) => {
     const s = v == null ? "" : String(Array.isArray(v) ? v.join(" / ") : v);
     return `"${s.replace(/"/g, '""')}"`;
-    };
+  };
   const rows = logs.map(l => [
     formatJST(l.ts), l.patientTag ?? "", l.mode ?? "", l.PBW ?? "",
     l.VTml ?? "", l.RR ?? "", l.FiO2 ?? "", l.PEEP ?? "", l.Pinsp ?? "", l.IPAP ?? "", l.EPAP ?? "", l.Flow ?? "", l.IEr ?? "",
     l.pH ?? "", l.PaO2 ?? "", l.PaCO2 ?? "", l.HCO3 ?? "", l.Lac ?? "", l.PFr ?? "", l.vtPerKg ?? "",
-    l.hasCOPD ? "1" : "", l.hasESRD ? "1" : "", l.dni ? "1" : "",
+    l.map ?? "", l.spo2 ?? "", l.urine1h ?? "", l.bleeding1h ?? "", l.uoPerKgH ?? "",
+    (l.pressors ?? []).map(p => `${p.drug}:${p.gamma ?? "-"}`).join(" "),
+    (l.guardrailReasons ?? []).join(" / "),
     l.summary ?? "", (l.problems ?? []).join(" / "), (l.suggestions ?? []).join(" / ")
   ].map(esc).join(","));
   return [headers.join(","), ...rows].join("\n");
@@ -186,7 +220,6 @@ function AxisChart({
   title: string; values: number[]; labels: string[]; yMin: number; yMax: number;
   bandLow?: number; bandHigh?: number; unit?: string; width?: number; height?: number;
 }) {
-  // ↓ bottom余白を少し広めに
   const margin = { top: 18, right: 10, bottom: 34, left: 44 };
   const iw = width - margin.left - margin.right;
   const ih = height - margin.top - margin.bottom;
@@ -203,10 +236,10 @@ function AxisChart({
   const bandTop = bandHigh != null ? toY(Math.min(bandHigh, yMax)) : undefined;
   const bandBottom = bandLow != null ? toY(Math.max(bandLow, yMin)) : undefined;
 
-  // ラベル用スタイル（白縁で可読性Up）
+  // ラベルの可読性向上（白縁）
   const labelStyle: React.CSSProperties = {
     fontSize: 10, fill: "#6b7280",
-    paintOrder: "stroke", // 文字のストロークを下に敷く
+    paintOrder: "stroke",
     stroke: "#ffffff", strokeWidth: 3,
   };
 
@@ -227,7 +260,7 @@ function AxisChart({
         />
       )}
 
-      {/* yグリッド（線は薄め） */}
+      {/* yグリッド */}
       {yTicks.map((t, idx) => {
         const y = margin.top + toY(t);
         return (
@@ -238,18 +271,16 @@ function AxisChart({
       {/* x軸線 */}
       <line x1={margin.left} x2={margin.left + iw} y1={margin.top + ih} y2={margin.top + ih} stroke="#d1d5db" shapeRendering="crispEdges" />
 
-      {/* 先に折れ線と点を描く（= 下層） */}
+      {/* 折れ線 + 点（先に描画してラベルを前面に） */}
       <path d={path} fill="none" stroke="#2563eb" strokeWidth={2} />
       {values.map((v, i) => (
         <circle key={i} cx={margin.left + toX(i)} cy={margin.top + toY(v)} r={3} fill="#2563eb" />
       ))}
 
-      {/* 単位（y軸上） */}
-      {unit && (
-        <text x={margin.left} y={margin.top - 6} fontSize="10" fill="#6b7280">{unit}</text>
-      )}
+      {/* 単位 */}
+      {unit && (<text x={margin.left} y={margin.top - 6} fontSize="10" fill="#6b7280">{unit}</text>)}
 
-      {/* y 目盛りラベル（最前面） */}
+      {/* y 目盛ラベル */}
       {yTicks.map((t, idx) => {
         const y = margin.top + toY(t);
         return (
@@ -259,7 +290,7 @@ function AxisChart({
         );
       })}
 
-      {/* x ラベル（最前面） */}
+      {/* x ラベル */}
       {labels.map((lb, i) => {
         const x = margin.left + toX(i);
         return (
@@ -270,6 +301,27 @@ function AxisChart({
       })}
     </svg>
   );
+}
+
+/* 昇圧剤：γ自動計算（rate[mL/h] × conc[mg/mL] → mg/h → µg/kg/min） */
+function calcGamma(
+  drug: Pressor["drug"],
+  weightKg?: number | "",
+  rateMlH?: number | "",
+  concMgMl?: number | ""
+) {
+  // VAS はγ表示なし（計算しない）
+  if (drug === "VAS") return undefined;
+
+  if (typeof weightKg !== "number" || weightKg <= 0) return undefined;
+  if (typeof rateMlH !== "number" || typeof concMgMl !== "number") return undefined;
+
+  const mgPerH = rateMlH * concMgMl;     // mg/h
+  const ugPerMin = (mgPerH * 1000) / 60; // µg/min
+  const ugPerKgMin = ugPerMin / weightKg;// µg/kg/min = γ
+
+  if (!isFinite(ugPerKgMin)) return undefined;
+  return Math.round(ugPerKgMin * 100) / 100;
 }
 
 
@@ -284,7 +336,7 @@ function TrendCard({ onOpen }: { onOpen: () => void }) {
       <h3 style={cardTitle}>📊 トレンド（プレビュー）</h3>
       <div style={{ display: "grid", gap: 12 }}>
         <AxisChart title="P/F" values={pfSeries} labels={labels} yMin={80} yMax={450} bandLow={100} bandHigh={400} unit="" width={320} height={180} />
-        <AxisChart title="PaCO₂ (mmHg)" values={pco2Series} labels={labels} yMin={25} yMax={70} bandLow={30} bandHigh={60} unit="" width={320} height={180} />
+        <AxisChart title="PaCO₂ (mmHg)" values={pco2Series} labels={labels} yMin={25} yMax={70} bandLow={30} bandHigh={60} unit="mmHg" width={320} height={180} />
       </div>
       <button onClick={onOpen} style={openBtn}>拡大して見る</button>
     </div>
@@ -308,7 +360,7 @@ function TrendModal({ onClose }: { onClose: () => void }) {
 
         <div style={{ display: "grid", gap: 16 }}>
           <AxisChart title="P/F" values={pfSeries} labels={labels} yMin={80} yMax={450} bandLow={100} bandHigh={400} unit="" width={680} height={260} />
-          <AxisChart title="PaCO₂ (mmHg)" values={pco2Series} labels={labels} yMin={25} yMax={70} bandLow={30} bandHigh={60} unit="" width={680} height={280} />
+          <AxisChart title="PaCO₂ (mmHg)" values={pco2Series} labels={labels} yMin={25} yMax={70} bandLow={30} bandHigh={60} unit="mmHg" width={680} height={260} />
         </div>
 
         <div style={{ marginTop: 12, fontSize: 12, color: "#6b7280" }}>
@@ -374,6 +426,57 @@ export default function Ventilation() {
   const [hasESRD, setHasESRD] = useState(false);
   const [dni, setDni] = useState(false);
 
+  /* ===== ローカル履歴 ===== */
+  const [logs, setLogs] = useState<VentLog[]>([]);
+  useEffect(() => { setLogs(loadLogs()); }, []);
+
+  const vtPerKg = useMemo(() => {
+    if (typeof VTml === "number" && PBW) return Math.round((VTml / PBW) * 10) / 10;
+    return undefined;
+  }, [VTml, PBW]);
+
+  /* ===== 追加：循環・出血・尿量 ===== */
+  const [map, setMap] = useState<number | "">("");
+  const [spo2, setSpO2] = useState<number | "">("");
+  const [urine1h, setUrine1h] = useState<number | "">("");
+  const [bleeding1h, setBleeding1h] = useState<number | "">("");
+  const uoPerKgH = useMemo(() => {
+    if (typeof urine1h !== "number" || typeof weight !== "number" || weight <= 0) return undefined;
+    return Math.round((urine1h / weight) * 10) / 10;
+  }, [urine1h, weight]);
+
+/* ===== 追加：昇圧剤（γ自動計算） ===== */
+const [pressors, setPressors] = useState<Pressor[]>([
+  // 初期行は NA を選択し、プリセット濃度を自動セット
+  { id: uuid4(), drug: "NA", rateMlH: "", concMgMl: PRESSOR_PRESETS.NA.defaultConc },
+]);
+
+function updatePressor(id: string, patch: Partial<Pressor>) {
+  setPressors(prev => prev.map(p => (p.id === id ? { ...p, ...patch } : p)));
+}
+
+function addPressor() {
+  setPressors(prev => [
+    ...prev,
+    { id: uuid4(), drug: "NA", rateMlH: "", concMgMl: PRESSOR_PRESETS.NA.defaultConc },
+  ]);
+}
+
+function removePressor(id: string) {
+  setPressors(prev => prev.filter(p => p.id !== id));
+}
+
+// γは常に自動計算（直接入力は廃止）
+const pressorsWithGamma = useMemo(() => {
+  const w = typeof weight === "number" ? weight : undefined;
+  return pressors.map(p => ({
+    ...p,
+    gamma: calcGamma(p.drug, w, p.rateMlH, p.concMgMl),
+  }));
+}, [pressors, weight]);
+
+
+  /* ===== サマリー/提案/問題点 ===== */
   const summary = useMemo(() => {
     const probs: string[] = [];
     if (typeof PFr === "number" && PFr < 200) probs.push(`酸素化不良 (P/F ${PFr})`);
@@ -389,8 +492,8 @@ export default function Ventilation() {
     if (mode === "VCV" || mode === "SIMV") {
       if (typeof RR === "number") s.push(`RR ${RR} → ${RR + 4} 回/分`);
       if (typeof VTml === "number" && PBW) {
-        const vtPerKg = VTml / PBW;
-        if (vtPerKg <= 6) s.push(`VT ${VTml} → ${Math.round(PBW * 6.5)} mL (PBW ${vtPerKg.toFixed(1)}→6.5 mL/kg)`);
+        const vtKg = VTml / PBW;
+        if (vtKg <= 6) s.push(`VT ${VTml} → ${Math.round(PBW * 6.5)} mL (PBW ${vtKg.toFixed(1)}→6.5 mL/kg)`);
       }
     } else if (mode === "PCV") {
       if (typeof RR === "number") s.push(`RR ${RR} → ${RR + 4} 回/分`);
@@ -417,15 +520,37 @@ export default function Ventilation() {
 
   const followup = "設定変更 15–30 分後に SpO₂・RR・BP・ABG を再評価。改善乏しければ次段階を検討。";
 
-  /* ===== ローカル履歴 ===== */
-  const [logs, setLogs] = useState<VentLog[]>([]);
-  useEffect(() => { setLogs(loadLogs()); }, []);
+  /* ===== ガードレール判定 ===== */
+  const anyHighNA = useMemo(
+    () => pressorsWithGamma.some(p => p.drug === "NA" && (p.gamma ?? 0) >= 0.2),
+    [pressorsWithGamma]
+  );
+  const hemoAtRisk = useMemo(() => {
+    const lowMAP = typeof map === "number" && map < 65;
+    const lowUO = typeof uoPerKgH === "number" && uoPerKgH < 0.5;
+    const highBleed = typeof bleeding1h === "number" && bleeding1h >= 200;
+    return Boolean(anyHighNA || lowMAP || lowUO || highBleed);
+  }, [anyHighNA, map, uoPerKgH, bleeding1h]);
 
-  const vtPerKg = useMemo(() => {
-    if (typeof VTml === "number" && PBW) return Math.round((VTml / PBW) * 10) / 10;
-    return undefined;
-  }, [VTml, PBW]);
+  function isPeepIncreaseSuggestion(s: string) {
+    return /PEEP\s*\d+(\.\d+)?\s*→\s*\d+/.test(s);
+  }
 
+  const guardrailReasons: string[] = useMemo(() => {
+    const reasons: string[] = [];
+    if (anyHighNA) reasons.push("NA ≥ 0.2γ");
+    if (typeof map === "number" && map < 65) reasons.push("MAP < 65");
+    if (typeof uoPerKgH === "number" && uoPerKgH < 0.5) reasons.push("尿量 < 0.5 mL/kg/h");
+    if (typeof bleeding1h === "number" && bleeding1h >= 200) reasons.push("出血 ≥ 200 mL/h");
+    return reasons;
+  }, [anyHighNA, map, uoPerKgH, bleeding1h]);
+
+  const suppressedPeepCount = useMemo(
+    () => hemoAtRisk ? suggestions.filter(isPeepIncreaseSuggestion).length : 0,
+    [hemoAtRisk, suggestions]
+  );
+
+  /* ===== ログ作成/保存 ===== */
   function buildCurrentLog(): VentLog {
     return {
       id: uuid4(),
@@ -438,6 +563,9 @@ export default function Ventilation() {
       PFr,
       vtPerKg,
       hasCOPD, hasESRD, dni,
+      map, spo2, urine1h, bleeding1h, uoPerKgH,
+      pressors: pressorsWithGamma.map(p => ({ drug: p.drug, gamma: p.gamma })),
+      guardrailReasons,
       summary,
       problems,
       suggestions,
@@ -445,24 +573,27 @@ export default function Ventilation() {
   }
 
   function handleSaveLog() {
+    if (hemoAtRisk) {
+      const msg = `ガードレール：循環リスク（${guardrailReasons.join(" / ")}）下です。\n` +
+                  (suppressedPeepCount > 0 ? `PEEP増量の提案は保留扱いです。\n` : "") +
+                  `この内容で保存しますか？`;
+      if (!confirm(msg)) return;
+    }
     const entry = buildCurrentLog();
-    const next = [entry, ...logs].slice(0, 200); // 直近200件で制限
+    const next = [entry, ...logs].slice(0, 200);
     setLogs(next);
     saveLogs(next);
   }
-
   function handleDeleteLog(id: string) {
     const next = logs.filter(l => l.id !== id);
     setLogs(next);
     saveLogs(next);
   }
-
   function handleClearAll() {
     if (!confirm("履歴を全て削除します。よろしいですか？")) return;
     setLogs([]);
     saveLogs([]);
   }
-
   function handleExportJSON() {
     downloadFile("ventilation_logs.json", JSON.stringify(logs, null, 2));
   }
@@ -497,25 +628,6 @@ export default function Ventilation() {
               <Field label="VT/体重 (mL/kg PBW)">
                 <div style={{ ...inputStyle, background: "#f3f4f6", display: "flex", alignItems: "center" }}>{vtPerKg ?? "—"}</div>
               </Field>
-            </div>
-          </div>
-
-          <div style={box}>
-            <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 4 }}>原疾患/ステータス（最大3）</div>
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              {tags.map((t) => (
-                <span key={t} style={{ background: "#eff6ff", color: "#1d4ed8", padding: "4px 8px", borderRadius: 999 }}>
-                  {t} <button onClick={() => removeTag(t)} style={{ marginLeft: 6 }}>×</button>
-                </span>
-              ))}
-              {tags.length < 3 && (
-                <input
-                  placeholder="＋ 追加"
-                  onKeyDown={(e) => { if (e.key === "Enter") { addTag((e.target as HTMLInputElement).value); (e.target as HTMLInputElement).value = ""; } }}
-                  onBlur={(e) => { addTag((e.target as HTMLInputElement).value); (e.target as HTMLInputElement).value = ""; }}
-                  style={inputStyle}
-                />
-              )}
             </div>
           </div>
 
@@ -571,6 +683,7 @@ export default function Ventilation() {
             </div>
           </div>
 
+          {/* ABG */}
           <div style={box}>
             <h3>ABG</h3>
             <div className="grid6">
@@ -587,20 +700,92 @@ export default function Ventilation() {
             </div>
           </div>
 
+          {/* 循環・出血・尿量 */}
           <div style={box}>
-            <label style={{ display: "block", fontSize: 12, color: "#6b7280", marginBottom: 4 }}>
-              <input type="checkbox" checked={hasCOPD} onChange={(e) => setHasCOPD(e.target.checked)} /> COPD
-            </label>
-            <label style={{ display: "block", fontSize: 12, color: "#6b7280", marginBottom: 4 }}>
-              <input type="checkbox" checked={hasESRD} onChange={(e) => setHasESRD(e.target.checked)} /> 末期腎不全（透析）
-            </label>
-            <label style={{ display: "block", fontSize: 12, color: "#6b7280", marginBottom: 4 }}>
-              <input type="checkbox" checked={dni} onChange={(e) => setDni(e.target.checked)} /> 挿管不実施（DNI）
-            </label>
-            <div style={{ marginTop: 8, fontSize: 12, color: "#6b7280" }}>
-              参考：PBW = 男性 50 + 0.91×(身長−152.4) / 女性 45.5 + 0.91×(身長−152.4) ／ ARDSでは VT ≈ 6 mL/kg PBW ／ Driving Pressure ≤ 15
+            <h3>🩸 バイタル/出血/尿量</h3>
+            <div className="grid6">
+              <Field label="平均血圧 MAP (mmHg)"><NumberBox value={map} setValue={setMap} /></Field>
+              <Field label="SpO₂ (%)"><NumberBox value={spo2} setValue={setSpO2} /></Field>
+              <Field label="直近1h 尿量 (mL)"><NumberBox value={urine1h} setValue={setUrine1h} /></Field>
+              <Field label="直近1h 出血量 (mL)"><NumberBox value={bleeding1h} setValue={setBleeding1h} /></Field>
+
             </div>
           </div>
+
+{/* 昇圧剤 */}
+<div style={box}>
+  <h3>🧪 昇圧剤（γ自動計算）</h3>
+  <div style={{ display:"grid", gap:8 }}>
+    {pressorsWithGamma.map((p) => {
+      const preset = PRESSOR_PRESETS[p.drug];
+      return (
+        <div
+          key={p.id}
+          style={{ display:"grid", gridTemplateColumns:"150px 1fr 1fr 120px 80px", gap:8, alignItems:"end" }}
+        >
+          {/* 薬剤 */}
+          <div>
+            <div style={{ fontSize:12, color:"#6b7280", marginBottom:4 }}>薬剤</div>
+            <select
+              value={p.drug}
+              onChange={(e) => {
+                const nextDrug = e.target.value as Pressor["drug"];
+                updatePressor(p.id, {
+                  drug: nextDrug,
+                  // 薬剤変更時、プリセット濃度があれば自動セット（なければ維持）
+                  concMgMl: PRESSOR_PRESETS[nextDrug].defaultConc ?? p.concMgMl,
+                });
+              }}
+              style={inputStyle}
+            >
+              {(["NA","DOPA","DOBU"] as Pressor["drug"][]).map(d => (
+                <option key={d} value={d}>{PRESSOR_PRESETS[d].label}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* 投与速度 */}
+          <div>
+            <Field label="投与速度 (mL/h)">
+              <NumberBox value={p.rateMlH} setValue={(v)=>updatePressor(p.id,{rateMlH:v})} />
+            </Field>
+          </div>
+
+          {/* 濃度：薬剤選択時にデフォルトを自動入力、その後は自由に上書き可 */}
+<div>
+  <Field label="濃度 (mg/mL)">
+    <NumberBox value={p.concMgMl} setValue={(v)=>updatePressor(p.id,{ concMgMl:v })} />
+  </Field>
+</div>
+
+
+          {/* 計算γ（VASは—表示） */}
+          <div>
+            <Field label="計算γ (µg/kg/min)">
+              <div style={{ ...inputStyle, background:"#f3f4f6" }}>{p.gamma ?? "—"}</div>
+            </Field>
+          </div>
+
+          {/* 行削除 */}
+          <div style={{ display:"flex", alignItems:"flex-end" }}>
+            {pressors.length > 1 && (
+              <button onClick={()=>removePressor(p.id)} style={{ ...ghostBtn, height:36 }}>削除</button>
+            )}
+          </div>
+        </div>
+      );
+    })}
+
+    <div>
+      <button onClick={addPressor} style={ghostBtn}>＋ 行を追加</button>
+    </div>
+
+    <div style={{ fontSize:12, color:"#6b7280" }}>
+      ※ γは投与速度と濃度から自動計算します。薬剤変更時は院内プリセット濃度が自動で入ります（上書き可能）。
+    </div>
+  </div>
+</div>
+
 
           {/* 保存操作 */}
           <div style={{ ...box, display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -613,6 +798,7 @@ export default function Ventilation() {
             </div>
           </div>
         </div>
+
         {/* 出力側 */}
         <div className="rightCol">
           <div style={box}>
@@ -631,10 +817,37 @@ export default function Ventilation() {
           <div style={box}>
             <h3>💡 設定提案</h3>
             <ul style={{ paddingLeft: 18, fontSize: 14 }}>
-              {suggestions.map((x, i) => (<li key={i}>{x}</li>))}
+              {suggestions.map((x, i) => {
+                const suppressed = hemoAtRisk && isPeepIncreaseSuggestion(x);
+                return (
+                  <li key={i} style={suppressed ? { color:"#6b7280" } : undefined}>
+                    {x}{suppressed && "（保留：循環リスク下では慎重）"}
+                  </li>
+                );
+              })}
             </ul>
           </div>
 
+          {/* ガードレール可視化 */}
+          <div style={box}>
+            <h3>🛡 ガードレール</h3>
+            {guardrailReasons.length === 0 ? (
+              <div style={{ fontSize:13, color:"#16a34a" }}>特記すべき警告はありません。</div>
+            ) : (
+              <>
+                <div style={{ fontSize:13, color:"#b45309", marginBottom:6 }}>
+                  循環リスクあり：{guardrailReasons.join(" / ")}
+                </div>
+                {suppressedPeepCount > 0 && (
+                  <div style={{ fontSize:12, color:"#92400e", background:"#fff7ed", border:"1px solid #fed7aa", borderRadius:8, padding:"6px 8px" }}>
+                    PEEP増量の提案は {suppressedPeepCount} 件が「保留」表示です。まず鎮痛鎮静・体位・出血評価・容量反応性評価等を優先してください。
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+
+          {/* ⏱ フォローアップ */}
           <div style={box}>
             <h3>⏱ フォローアップ</h3>
             <div style={{ fontSize: 14 }}>{followup}</div>
@@ -643,71 +856,70 @@ export default function Ventilation() {
           {/* 📊 トレンド（軸・帯付き） */}
           <TrendCard onOpen={() => setShowTrend(true)} />
 
-          {/* 🗂 履歴テーブル：単一ボックス＋内部スクロール */}
+          {/* 履歴テーブル（ボックス内スクロール） */}
           <div style={box}>
-  <h3>🗂 保存在庫（この端末）</h3>
-  {logs.length === 0 ? (
-    <div style={{ fontSize: 13, color: "#6b7280" }}>
-      保存はありません。「💾 この内容を保存」で記録できます。
-    </div>
-  ) : (
-    <div className="historyWrap">
-      <table className="historyTable">
-        {/* 列幅を明示（最後の「要点」を可変領域に） */}
-        <colgroup>
-          <col style={{ width: 120 }} /> {/* 日時 */}
-          <col style={{ width: 120 }} /> {/* タグ */}
-          <col style={{ width: 72 }} />  {/* モード */}
-          <col style={{ width: 66 }} />  {/* P/F */}
-          <col style={{ width: 66 }} />  {/* FiO2 */}
-          <col style={{ width: 66 }} />  {/* PEEP */}
-          <col style={{ width: 72 }} />  {/* PaCO2 */}
-          <col style={{ width: 80 }} />  {/* VT */}
-          <col style={{ width: 82 }} />  {/* VT/PBW */}
-          <col />                        {/* 要点（可変・折り返し） */}
-          <col style={{ width: 64 }} />  {/* 操作 */}
-        </colgroup>
-        <thead>
-          <tr>
-            <Th>日時</Th>
-            <Th>タグ</Th>
-            <Th>モード</Th>
-            <Th>P/F</Th>
-            <Th>FiO₂</Th>
-            <Th>PEEP</Th>
-            <Th>PaCO₂</Th>
-            <Th>VT(mL)</Th>
-            <Th>VT/PBW</Th>
-            <Th>要点</Th>
-            <Th></Th>
-          </tr>
-        </thead>
-        <tbody>
-          {logs.map((l) => (
-            <tr key={l.id}>
-              <Td>{formatJST(l.ts)}</Td>
-              <Td>{l.patientTag ?? "—"}</Td>
-              <Td>{l.mode}</Td>
-              <Td>{l.PFr ?? "—"}</Td>
-              <Td>{l.FiO2 ?? "—"}</Td>
-              <Td>{l.PEEP ?? "—"}</Td>
-              <Td>{l.PaCO2 ?? "—"}</Td>
-              <Td>{l.VTml ?? "—"}</Td>
-              <Td>{l.vtPerKg ?? "—"}</Td>
-              {/* 要点は折り返し可 */}
-              <Td className="wrapCell">
-                {(l.problems && l.problems[0]) || (l.suggestions && l.suggestions[0]) || "—"}
-              </Td>
-              <Td><button onClick={() => handleDeleteLog(l.id)} style={rowDelBtn}>削除</button></Td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  )}
-</div>
-        </div> {/* ← ここで rightCol を閉じる */}
-      </div>   {/* ← ここで layout を閉じる */}
+            <h3>🗂 保存在庫（この端末）</h3>
+            {logs.length === 0 ? (
+              <div style={{ fontSize: 13, color: "#6b7280" }}>
+                保存はありません。「💾 この内容を保存」で記録できます。
+              </div>
+            ) : (
+              <div className="historyWrap">
+                <table className="historyTable">
+                  <colgroup>
+                    <col style={{ width: 120 }} />
+                    <col style={{ width: 120 }} />
+                    <col style={{ width: 72 }} />
+                    <col style={{ width: 66 }} />
+                    <col style={{ width: 66 }} />
+                    <col style={{ width: 66 }} />
+                    <col style={{ width: 72 }} />
+                    <col style={{ width: 80 }} />
+                    <col style={{ width: 82 }} />
+                    <col />
+                    <col style={{ width: 64 }} />
+                  </colgroup>
+                  <thead>
+                    <tr>
+                      <Th>日時</Th>
+                      <Th>タグ</Th>
+                      <Th>モード</Th>
+                      <Th>P/F</Th>
+                      <Th>FiO₂</Th>
+                      <Th>PEEP</Th>
+                      <Th>PaCO₂</Th>
+                      <Th>VT(mL)</Th>
+                      <Th>VT/PBW</Th>
+                      <Th>要点</Th>
+                      <Th></Th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {logs.map((l) => (
+                      <tr key={l.id}>
+                        <Td>{formatJST(l.ts)}</Td>
+                        <Td>{l.patientTag ?? "—"}</Td>
+                        <Td>{l.mode}</Td>
+                        <Td>{l.PFr ?? "—"}</Td>
+                        <Td>{l.FiO2 ?? "—"}</Td>
+                        <Td>{l.PEEP ?? "—"}</Td>
+                        <Td>{l.PaCO2 ?? "—"}</Td>
+                        <Td>{l.VTml ?? "—"}</Td>
+                        <Td>{l.vtPerKg ?? "—"}</Td>
+                        <Td className="wrapCell">
+                          {(l.problems && l.problems[0]) || (l.suggestions && l.suggestions[0]) || "—"}
+                        </Td>
+                        <Td><button onClick={() => handleDeleteLog(l.id)} style={rowDelBtn}>削除</button></Td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+        </div> {/* rightCol */}
+      </div>   {/* layout */}
 
       {showTrend && <TrendModal onClose={() => setShowTrend(false)} />}
 
@@ -728,52 +940,38 @@ export default function Ventilation() {
           .grid12 { grid-template-columns: 1fr 3fr; }
         }
 
-        /* 右カラムが中身で横に拡張しないように */
         .rightCol { min-width: 0; }
 
-        /* 履歴はボックス内スクロール */
-/* 右カラムが中身で横に拡張しないように */
-.rightCol { min-width: 0; }
-
-/* 履歴はボックス内スクロール（縦・横） */
-.historyWrap {
-  max-height: 320px;
-  overflow: auto;            /* 縦横スクロール */
-  border: 1px solid #f3f4f6;
-  border-radius: 8px;
-}
-
-/* テーブルは横スクロール前提で最小幅を確保 */
-.historyTable {
-  width: 100%;
-  min-width: 860px;          /* ここで各列が潰れにくくなる */
-  border-collapse: collapse;
-  table-layout: auto;        /* fixed → auto に変更（可変列が自然に広がる） */
-}
-
-/* セルの文字が読めるサイズ＆行間 */
-.historyTable th, .historyTable td {
-  font-size: 12.5px;
-  line-height: 1.35;
-  padding: 8px 10px;
-  border-bottom: 1px solid #f3f4f6;
-  vertical-align: top;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;       /* デフォルトは折り返さない */
-}
-
-/* 要点だけは折り返しを許可して可読性優先 */
-.historyTable .wrapCell {
-  white-space: normal;
-  word-break: break-word;
-}
-
+        .historyWrap {
+          max-height: 320px;
+          overflow: auto;
+          border: 1px solid #f3f4f6;
+          border-radius: 8px;
+        }
+        .historyTable {
+          width: 100%;
+          min-width: 860px;
+          border-collapse: collapse;
+          table-layout: auto;
+        }
+        .historyTable th, .historyTable td {
+          font-size: 12.5px;
+          line-height: 1.35;
+          padding: 8px 10px;
+          border-bottom: 1px solid #f3f4f6;
+          vertical-align: top;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .historyTable .wrapCell {
+          white-space: normal;
+          word-break: break-word;
+        }
       `}</style>
     </div>
   );
 }
-
 
 /* Small Buttons */
 const primaryBtn: React.CSSProperties = { padding: "8px 12px", borderRadius: 8, border: "1px solid #2563eb", background: "#2563eb", color: "#fff", fontWeight: 600 };
