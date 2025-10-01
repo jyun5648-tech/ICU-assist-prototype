@@ -1,6 +1,17 @@
 // === ファイル: pages/index.tsx ===
 import Link from "next/link";
 
+import { ping } from "@/lib/healthcheck";
+
+export default function Home() {
+  return (
+    <div>
+      <p className="text-sm text-gray-500">alias healthcheck: {ping()}</p>
+      {/* 既存UIはこの下にそのままでOK */}
+    </div>
+  );
+}
+
 
 export default function Home() {
 return (
